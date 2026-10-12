@@ -1,0 +1,49 @@
+# BoneTrace: Region Supervision vs Explanation Reliability
+# Default Configuration
+# Relative paths are resolved against the repository root.
+
+project:
+  name: "bonetrace"
+  seed: 42
+  device: "cpu"  # Default to "cpu" for deterministic reproducibility; auto-detects CUDA if available
+
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  output_dir: "outputs"
+  checkpoints_dir: "outputs/checkpoints"
+  logs_dir: "outputs/logs"
+  explanations_dir: "outputs/explanations"
+  evaluation_dir: "outputs/evaluation"
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_filename: "bonetrace.log"
+
+preprocessing:
+  image_size: [512, 512]
+  val_split: 0.15
+  test_split: 0.15
+
+training:
+  model_name: "resnet18"
+  model_type: "baseline"  # Options: "baseline", "region_supervised"
+  batch_size: 16
+  num_epochs: 20
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  pos_weight: 4.6166       # Reconciles FracAtlas 17.6% class imbalance (2336 neg / 506 pos in train)
+  aux_loss_weight: 1.0     # Auxiliary region supervision loss weight lambda_reg
+  pretrained: false        # False ensures deterministic offline CPU execution without downloads
+  num_workers: 0
+  dropout_rate: 0.0
+
+explainability:
+  method: "gradcam"
+  target_layer: "layer4"   # layer4[-1] residual block of ResNet-18
+  num_samples: 20
+
+evaluation:
+  max_xai_samples: 50
+  perturbation_std: 0.02   # Label-preserving Gaussian noise std for explanation stability evaluation

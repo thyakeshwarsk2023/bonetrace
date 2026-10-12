@@ -1,0 +1,44 @@
+# BoneTrace: Region-Supervised Model Experiment Configuration
+# Architecture: ResNet-18 dual-head with auxiliary fracture-region localization supervision
+# Explanation: Post-hoc Grad-CAM extracted from identical backbone.layer4[-1]
+
+project:
+  name: "bonetrace_region_supervised"
+  seed: 42
+  device: "cpu"
+
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  output_dir: "outputs"
+  checkpoints_dir: "outputs/checkpoints"
+  logs_dir: "outputs/logs"
+  explanations_dir: "outputs/explanations/region_supervised"
+  evaluation_dir: "outputs/evaluation/region_supervised"
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_filename: "train_region_supervised.log"
+
+training:
+  model_name: "resnet18"
+  model_type: "region_supervised"
+  batch_size: 16
+  num_epochs: 20
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  pos_weight: 4.6166
+  aux_loss_weight: 1.0       # Auxiliary localization loss weight lambda_reg
+  pretrained: false
+  num_workers: 0
+  dropout_rate: 0.0
+
+explainability:
+  method: "gradcam"
+  target_layer: "layer4"
+  num_samples: 20
+
+evaluation:
+  max_xai_samples: 50
+  perturbation_std: 0.02
