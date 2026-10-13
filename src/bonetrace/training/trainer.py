@@ -7,8 +7,13 @@ Features:
 - Configurable loss weighting accounting for FracAtlas 17.6% class imbalance (~4.6:1 pos_weight).
 - Separate classification loss and auxiliary region localization loss logging.
 - Comprehensive validation metrics: ROC-AUC, PR-AUC, Precision, Recall, F1, Balanced Accuracy, Confusion Matrix.
-- Checkpoint persistence (latest_checkpoint.pt, best_model.pt) and machine-readable training logs.
-- Strict isolation of test set (validation-set-only checkpoint selection).
+- Checkpoint persistence (latest_checkpoint.pt, best_model.pt, and seed-specific checkpoints).
+- High-performance GPU acceleration:
+  * Automatic Mixed Precision (AMP FP16) with GradScaler.
+  * Asynchronous PCIe streaming (pin_memory + non_blocking=True).
+  * Fast zero_grad(set_to_none=True).
+  * Batched tensor metric aggregation to avoid GPU synchronization stalls.
+  * Multi-worker DataLoader with persistent_workers=True and prefetching.
 """
 
 from __future__ import annotations
@@ -131,7 +136,11 @@ class Trainer:
             eta_min=self.learning_rate * 0.01,
         )
 
-        # 7. Checkpoints directory
+        # 7. GPU Acceleration & Mixed Precision (AMP)
+        self.use_amp = (self.device.type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+
+        # 8. Checkpoints directory
         self.checkpoints_dir = Path(config.paths.checkpoints_dir) / self.model_type
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
@@ -155,17 +164,17 @@ class Trainer:
             Tuple of (total_loss tensor, dictionary of loss scalar values).
         """
         cls_logits = outputs["logits"]
-        labels = batch["label"].to(self.device)
+        labels = batch["label"].to(self.device, non_blocking=True)
 
         cls_loss = self.cls_criterion(cls_logits, labels)
         aux_loss = torch.tensor(0.0, device=self.device)
 
         if self.is_region_supervised and "mask_logits" in outputs:
             mask_logits = outputs["mask_logits"]
-            target_masks = batch["mask"].to(self.device)
-            has_ann = batch["has_annotation"].to(self.device)
+            target_masks = batch["mask"].to(self.device, non_blocking=True)
+            has_ann = batch["has_annotation"].to(self.device, non_blocking=True)
 
-            # Supervision mask: supervise negative images (zero mask) and positive images with verified annotations.
+            # Supervise negative images (zero mask) and positive images with verified annotations.
             # Mask out unannotated positive images so missing annotations are not treated as true negative regions.
             valid_mask = (labels.squeeze(-1) < 0.5) | has_ann
             if valid_mask.any():
@@ -193,15 +202,24 @@ class Trainer:
         n_batches = 0
 
         for batch in dataloader:
-            images = batch["image"].to(self.device)
-            self.optimizer.zero_grad()
+            # Asynchronous streaming to GPU
+            images = batch["image"].to(self.device, non_blocking=True)
+            self.optimizer.zero_grad(set_to_none=True)
 
-            outputs = self.model(images)
-            total_loss, loss_dict = self.compute_loss(outputs, batch)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                outputs = self.model(images)
+                total_loss, loss_dict = self.compute_loss(outputs, batch)
 
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
-            self.optimizer.step()
+            if self.use_amp:
+                self.scaler.scale(total_loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                self.optimizer.step()
 
             total_loss_accum += loss_dict["total_loss"]
             cls_loss_accum += loss_dict["cls_loss"]
@@ -225,21 +243,22 @@ class Trainer:
         aux_loss_accum = 0.0
         n_batches = 0
 
-        all_probs: List[float] = []
-        all_labels: List[int] = []
+        all_probs_list: List[torch.Tensor] = []
+        all_labels_list: List[torch.Tensor] = []
 
         with torch.no_grad():
             for batch in dataloader:
-                images = batch["image"].to(self.device)
-                outputs = self.model(images)
-                _, loss_dict = self.compute_loss(outputs, batch)
+                images = batch["image"].to(self.device, non_blocking=True)
+                with torch.amp.autocast("cuda", enabled=self.use_amp):
+                    outputs = self.model(images)
+                    _, loss_dict = self.compute_loss(outputs, batch)
 
                 logits = outputs["logits"]
-                probs = torch.sigmoid(logits).cpu().flatten().tolist()
-                lbls = batch["label"].cpu().flatten().long().tolist()
+                probs = torch.sigmoid(logits).squeeze(-1)
+                lbls = batch["label"].to(self.device, non_blocking=True).squeeze(-1)
 
-                all_probs.extend(probs)
-                all_labels.extend(lbls)
+                all_probs_list.append(probs)
+                all_labels_list.append(lbls)
 
                 total_loss_accum += loss_dict["total_loss"]
                 cls_loss_accum += loss_dict["cls_loss"]
@@ -250,18 +269,22 @@ class Trainer:
         val_cls_loss = (cls_loss_accum / n_batches) if n_batches > 0 else 0.0
         val_aux_loss = (aux_loss_accum / n_batches) if n_batches > 0 else 0.0
 
-        y_true = np.array(all_labels)
-        y_prob = np.array(all_probs)
+        if all_probs_list:
+            y_prob = torch.cat(all_probs_list).cpu().numpy()
+            y_true = torch.cat(all_labels_list).cpu().numpy().astype(int)
+        else:
+            y_prob = np.array([])
+            y_true = np.array([])
+
         y_pred = (y_prob >= 0.5).astype(int)
 
-        # Robust metric calculation handling edge cases (e.g. single class)
         metrics: Dict[str, float] = {
             "val_loss": float(val_total_loss),
             "val_cls_loss": float(val_cls_loss),
             "val_aux_loss": float(val_aux_loss),
         }
 
-        # ROC-AUC
+        # ROC-AUC & PR-AUC
         if len(np.unique(y_true)) > 1:
             try:
                 metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
@@ -313,6 +336,7 @@ class Trainer:
         """Persist model state, optimizer state, and training metrics."""
         state = {
             "epoch": epoch,
+            "seed": self.seed,
             "model_type": self.model_type,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -326,6 +350,13 @@ class Trainer:
         save_path = self.checkpoints_dir / filename
         torch.save(state, save_path)
         logger.info("Saved checkpoint: %s (epoch %d, val_auc=%.4f)", save_path, epoch, metrics.get("roc_auc", 0.0))
+
+        if is_best:
+            root_chk_dir = Path(self.config.paths.checkpoints_dir)
+            seed_ckpt_path = root_chk_dir / f"{self.model_type}_seed{self.seed}.pt"
+            torch.save(state, seed_ckpt_path)
+            logger.info("Saved seed checkpoint: %s", seed_ckpt_path)
+
         return save_path
 
     def load_checkpoint(self, checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
@@ -334,7 +365,7 @@ class Trainer:
         if not cpath.is_file():
             raise FileNotFoundError(f"Checkpoint file not found: {cpath}")
 
-        checkpoint = torch.load(cpath, map_location=self.device)
+        checkpoint = torch.load(cpath, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint and hasattr(self, "optimizer"):
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -432,6 +463,7 @@ class Trainer:
 
         final_summary = {
             "model_type": self.model_type,
+            "seed": self.seed,
             "best_epoch": self.best_epoch,
             "best_val_auc": self.best_val_auc,
             "total_epochs": self.num_epochs,
@@ -485,7 +517,7 @@ def run_training(config: AppConfig, model_type: Optional[str] = None) -> Trainer
     )
 
     batch_size = int(raw_training.get("batch_size", 16))
-    num_workers = int(raw_training.get("num_workers", 0))
+    num_workers = int(raw_training.get("num_workers", 2))
 
     train_loader = DataLoader(
         train_dataset,
@@ -493,6 +525,8 @@ def run_training(config: AppConfig, model_type: Optional[str] = None) -> Trainer
         shuffle=True,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None,
         collate_fn=fracatlas_collate_fn,
     )
     val_loader = DataLoader(
@@ -501,6 +535,8 @@ def run_training(config: AppConfig, model_type: Optional[str] = None) -> Trainer
         shuffle=False,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None,
         collate_fn=fracatlas_collate_fn,
     )
 

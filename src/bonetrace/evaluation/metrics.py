@@ -358,18 +358,27 @@ def compute_attribution_occlusion_faithfulness(
 
     # 2. Extract Grad-CAM attribution heatmap (H, W) in [0.0, 1.0]
     cam = gradcam.generate(image_tensor, class_idx=0)
-    flat_cam = cam.flatten()
-    n_total = len(flat_cam)
-    n_mask = max(1, int(round(n_total * top_k_ratio)))
 
-    # 3. Top-k attribution mask (indices of highest attribution)
-    sorted_desc = np.argsort(-flat_cam)
+    # Anatomical FOV constraint: exclude letterbox black padding (channel 0 < -2.0)
+    pad_mask = (image_tensor[0] < -2.0).cpu().numpy()
+    fov_mask = ~pad_mask
+    n_fov = int(fov_mask.sum())
+    n_mask = max(1, int(round((n_fov if n_fov > 0 else cam.size) * top_k_ratio)))
+
+    cam_for_attr = cam.copy()
+    cam_for_attr[pad_mask] = -np.inf  # Prevent sampling padding as top attribution
+
+    cam_for_ctrl = cam.copy()
+    cam_for_ctrl[pad_mask] = np.inf   # Prevent sampling padding as control baseline
+
+    # 3. Top-k attribution mask (indices of highest attribution within FOV)
+    sorted_desc = np.argsort(-cam_for_attr.flatten())
     attr_indices = sorted_desc[:n_mask]
     attr_mask_2d = np.zeros_like(cam, dtype=bool)
     attr_mask_2d[np.unravel_index(attr_indices, cam.shape)] = True
 
-    # 4. Equal-area control mask: least-attributed pixels (indices of lowest attribution)
-    sorted_asc = np.argsort(flat_cam)
+    # 4. Equal-area control mask: least-attributed pixels strictly within valid FOV
+    sorted_asc = np.argsort(cam_for_ctrl.flatten())
     ctrl_indices = sorted_asc[:n_mask]
     ctrl_mask_2d = np.zeros_like(cam, dtype=bool)
     ctrl_mask_2d[np.unravel_index(ctrl_indices, cam.shape)] = True

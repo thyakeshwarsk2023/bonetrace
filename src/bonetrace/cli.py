@@ -76,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Computation device override (cuda, cpu)",
     )
+    common_parser.add_argument(
+        "--seed",
+        dest="seed",
+        type=int,
+        default=None,
+        help="Random seed override for deterministic execution",
+    )
 
     subparsers = parser.add_subparsers(
         dest="command",
@@ -219,6 +226,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "num_epochs": getattr(args, "num_epochs", None),
         "num_samples": getattr(args, "num_samples", None),
         "allow_untrained": getattr(args, "allow_untrained", False),
+        "seed": getattr(args, "seed", None),
     }
 
     try:

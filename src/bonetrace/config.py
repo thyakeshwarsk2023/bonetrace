@@ -143,6 +143,11 @@ def load_config(
             if v is not None:
                 if k in ("raw_data_dir", "processed_data_dir", "output_dir"):
                     paths_dict[k] = v
+                    if k == "output_dir" and "checkpoints_dir" not in overrides:
+                        paths_dict["checkpoints_dir"] = Path(v) / "checkpoints"
+                        paths_dict["logs_dir"] = Path(v) / "logs"
+                        paths_dict["explanations_dir"] = Path(v) / "explanations"
+                        paths_dict["evaluation_dir"] = Path(v) / "evaluation"
                 elif k in ("log_level", "level"):
                     logging_dict["level"] = v
                 elif k in ("seed", "device"):
