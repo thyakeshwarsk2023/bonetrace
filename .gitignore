@@ -26,9 +26,12 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
-# Project outputs and checkpoints: ignore outputs, preserve directory
+# Project outputs and checkpoints: ignore outputs, preserve directory and audit reports
 outputs/*
 !outputs/.gitkeep
+!outputs/audit/
+!outputs/tables/
+!outputs/tables/T7_corrected_cases.md
 
 # IDE and OS files
 .vscode/

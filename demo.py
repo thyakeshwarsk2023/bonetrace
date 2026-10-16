@@ -80,8 +80,10 @@ def predict_and_explain(input_img: Image.Image):
     with torch.no_grad():
         out_b = model_base(tensor_gpu.unsqueeze(0))
         out_r = model_reg(tensor_gpu.unsqueeze(0))
-        logit_b = out_b[0].item() if isinstance(out_b, (tuple, list)) else out_b.item()
-        logit_r = out_r[0].item() if isinstance(out_r, (tuple, list)) else out_r.item()
+        raw_b = out_b["logits"] if isinstance(out_b, dict) else (out_b[0] if isinstance(out_b, (tuple, list)) else out_b)
+        raw_r = out_r["logits"] if isinstance(out_r, dict) else (out_r[0] if isinstance(out_r, (tuple, list)) else out_r)
+        logit_b = raw_b.squeeze().item()
+        logit_r = raw_r.squeeze().item()
         prob_b = torch.sigmoid(torch.tensor(logit_b)).item()
         prob_r = torch.sigmoid(torch.tensor(logit_r)).item()
 
@@ -113,7 +115,7 @@ def predict_and_explain(input_img: Image.Image):
 
 
 # Gradio UI Layout
-with gr.Blocks(title="BoneTrace - Post-Hoc Fracture Localization", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="BoneTrace - Post-Hoc Fracture Localization") as demo:
     gr.Markdown("# 🦴 BoneTrace: Fracture Detection & Post-Hoc XAI")
     gr.Markdown(
         "*Controlled research benchmark evaluating whether auxiliary fracture-region supervision "
@@ -142,4 +144,4 @@ with gr.Blocks(title="BoneTrace - Post-Hoc Fracture Localization", theme=gr.them
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    demo.launch(server_name="127.0.0.1", theme=gr.themes.Soft())
