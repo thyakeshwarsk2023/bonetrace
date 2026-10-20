@@ -1,0 +1,36 @@
+{
+  "run_id": "B_seed2026_83fd232",
+  "arm": "B",
+  "seed": 2026,
+  "git_sha": "83fd232b7551386021462fd30bafbcbedbef75bf",
+  "git_sha7": "83fd232",
+  "manifest_sha256": {
+    "train.csv": "3921741fb7e73b6c5cca486e470e6780369c6f8c5beb854bd2559a82ca2ace9e",
+    "val.csv": "04ac4fe37b35568a596bccb0ce7884b7ea82112eca9384e343fb8d0fbd432bf9",
+    "test.csv": "6a32f8dcb20e8d081e8c017a04b8fc849bb2856f025d4f4554c92207ae61c089"
+  },
+  "pos_weight": 4.70340681,
+  "torch_version": "2.5.1+cu121",
+  "cuda_version": "12.1",
+  "device_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "hyperparameters": {
+    "epochs": 20,
+    "batch_size": 16,
+    "grad_accum_steps": 2,
+    "effective_batch_size": 32,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "scheduler": "CosineAnnealingLR",
+    "T_max": 20,
+    "eta_min": 1e-06,
+    "amp": true,
+    "lambda_aux": 1.0,
+    "lambda_cam": 0.0
+  },
+  "start_time_utc": "2026-10-20T03:46:52.025866+00:00",
+  "end_time_utc": "2026-10-20T04:04:43.824018+00:00",
+  "total_train_time_sec": 1071.7971501350403,
+  "mean_epoch_time_sec": 53.548847591876985,
+  "best_epoch": 7,
+  "best_val_roc_auc": 0.8216759131697509
+}

@@ -26,12 +26,17 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
-# Project outputs and checkpoints: ignore outputs, preserve directory and audit reports
+# Model weights (checkpoints)
+*.pt
+*.pth
+
+# Project outputs and checkpoints: ignore outputs, preserve directory, audit reports, and Track B artifacts
 outputs/*
 !outputs/.gitkeep
 !outputs/audit/
 !outputs/tables/
 !outputs/tables/T7_corrected_cases.md
+!outputs/trackb/
 
 # IDE and OS files
 .vscode/
