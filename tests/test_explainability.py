@@ -43,6 +43,35 @@ def test_gradcam_region_supervised_heatmap_generation():
     gradcam.remove_hooks()
 
 
+def test_gradcam_densenet121_baseline_heatmap_generation():
+    """Verify GradCAM generates 512x512 normalized heatmap for DenseNet-121 baseline."""
+    model = BaselineClassifier(backbone="densenet121", pretrained=False)
+    gradcam = GradCAM(model=model, target_size=(512, 512))
+
+    x = torch.randn(1, 3, 512, 512)
+    heatmap = gradcam.generate(x, class_idx=0)
+
+    assert heatmap.shape == (512, 512)
+    assert 0.0 <= heatmap.min() <= 1.0
+    assert 0.0 <= heatmap.max() <= 1.0
+    gradcam.remove_hooks()
+
+
+def test_gradcam_densenet121_region_heatmap_generation():
+    """Verify GradCAM generates 512x512 normalized heatmap for DenseNet-121 region model."""
+    model = RegionSupervisedModel(backbone="densenet121", pretrained=False, target_size=(512, 512))
+    gradcam = GradCAM(model=model, target_size=(512, 512))
+
+    x = torch.randn(1, 3, 512, 512)
+    heatmap = gradcam.generate(x, class_idx=0)
+
+    assert heatmap.shape == (512, 512)
+    assert 0.0 <= heatmap.min() <= 1.0
+    assert 0.0 <= heatmap.max() <= 1.0
+    gradcam.remove_hooks()
+
+
+
 def test_render_heatmap_overlay():
     """Verify overlay blending returns HxWx3 uint8 image."""
     img = np.ones((512, 512, 3), dtype=np.uint8) * 128

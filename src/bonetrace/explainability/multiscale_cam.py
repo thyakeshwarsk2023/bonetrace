@@ -86,15 +86,29 @@ class MultiScaleAttributionEngine:
         self.device = device
         self.model.eval()
 
-        # Identify layers in ResNet-18
-        if hasattr(model, "backbone"):
-            self.layer4 = model.backbone.layer4[-1]
-            self.layer3 = model.backbone.layer3[-1]
-            self.layer2 = model.backbone.layer2[-1]
+        # Ensure all ReLUs in model have inplace=False
+        for m in self.model.modules():
+            if isinstance(m, nn.ReLU) and m.inplace:
+                m.inplace = False
+
+        # Identify layers in ResNet-18 or DenseNet-121
+        backbone = getattr(model, "backbone", model)
+        if hasattr(backbone, "features") and hasattr(backbone.features, "denseblock4"):
+            # DenseNet-121
+            self.layer4 = backbone.features.denseblock4
+            self.layer3 = backbone.features.denseblock3
+            self.layer2 = getattr(backbone.features, "denseblock2", None)
+        elif hasattr(backbone, "layer4"):
+            # ResNet-18
+            self.layer4 = backbone.layer4[-1]
+            self.layer3 = backbone.layer3[-1]
+            self.layer2 = backbone.layer2[-1]
+        elif hasattr(model, "get_cam_target_layer"):
+            self.layer4 = model.get_cam_target_layer()
+            self.layer3 = getattr(model, "layer3", None)
+            self.layer2 = getattr(model, "layer2", None)
         else:
-            self.layer4 = model.layer4[-1]
-            self.layer3 = model.layer3[-1]
-            self.layer2 = model.layer2[-1]
+            raise ValueError("Unable to identify target layers for MultiScaleAttributionEngine.")
 
     def _extract_activations_and_gradients(
         self,

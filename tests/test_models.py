@@ -91,3 +91,48 @@ def test_deterministic_initialization():
     w1 = m1.backbone.conv1.weight.detach()
     w2 = m2.backbone.conv1.weight.detach()
     assert torch.equal(w1, w2)
+
+
+def test_densenet121_baseline_forward_and_feature_shapes():
+    """Verify DenseNet-121 baseline produces (B, 1) logits and (B, 1024, 16, 16) features."""
+    model = BaselineClassifier(backbone="densenet121", pretrained=False)
+    model.eval()
+
+    x = torch.randn(2, 3, 512, 512)
+    with torch.no_grad():
+        feat = model.extract_features(x)
+        out = model(x)
+
+    assert feat.shape == (2, 1024, 16, 16)
+    assert out["logits"].shape == (2, 1)
+    assert model.backbone_name == "densenet121"
+    assert model.get_cam_target_layer() == model.backbone.features.denseblock4
+
+
+def test_densenet121_region_supervised_forward_and_aux_shapes():
+    """Verify DenseNet-121 region model produces (B, 1) logits and (B, 1, 512, 512) mask logits."""
+    model = RegionSupervisedModel(backbone="densenet121", pretrained=False, target_size=(512, 512))
+    model.eval()
+
+    x = torch.randn(2, 3, 512, 512)
+    with torch.no_grad():
+        feat = model.extract_features(x)
+        out = model(x)
+
+    assert feat.shape == (2, 1024, 16, 16)
+    assert out["logits"].shape == (2, 1)
+    assert out["mask_logits"].shape == (2, 1, 512, 512)
+    assert model.backbone_name == "densenet121"
+    assert model.get_cam_target_layer() == model.backbone.features.denseblock4
+
+
+def test_build_model_densenet121_variants():
+    """Verify factory builds both baseline and region models with densenet121."""
+    m_base = build_model(model_type="baseline", backbone="densenet121")
+    assert isinstance(m_base, BaselineClassifier)
+    assert m_base.backbone_name == "densenet121"
+
+    m_reg = build_model(model_type="region_supervised", backbone="densenet121")
+    assert isinstance(m_reg, RegionSupervisedModel)
+    assert m_reg.backbone_name == "densenet121"
+

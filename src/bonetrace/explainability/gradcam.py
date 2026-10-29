@@ -56,10 +56,23 @@ class GradCAM:
         self.model = model
         self.target_size = target_size
 
+        # Ensure all ReLUs in model have inplace=False so autograd backward hooks function without view errors
+        for m in self.model.modules():
+            if isinstance(m, nn.ReLU) and m.inplace:
+                m.inplace = False
+
         if target_layer is not None:
             self.target_layer = target_layer
         elif hasattr(model, "get_cam_target_layer"):
             self.target_layer = model.get_cam_target_layer()
+        elif hasattr(model, "backbone") and hasattr(model.backbone, "features") and hasattr(model.backbone.features, "denseblock4"):
+            self.target_layer = model.backbone.features.denseblock4
+        elif hasattr(model, "features") and hasattr(model.features, "denseblock4"):
+            self.target_layer = model.features.denseblock4
+        elif hasattr(model, "backbone") and hasattr(model.backbone, "layer4"):
+            self.target_layer = model.backbone.layer4[-1]
+        elif hasattr(model, "layer4"):
+            self.target_layer = model.layer4[-1]
         else:
             # Fallback: search for last Conv2d or residual block
             convs = [m for m in model.modules() if isinstance(m, nn.Conv2d)]
