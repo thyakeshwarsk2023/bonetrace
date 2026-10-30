@@ -51,6 +51,7 @@ from bonetrace.ui.helpers import (
     load_markdown_table,
     load_json_safe,
     get_checkpoint_path,
+    scan_available_checkpoints,
 )
 
 # ── Page Configuration ────────────────────────────────────────────────────────
@@ -225,7 +226,10 @@ st.markdown(
 @st.cache_resource(show_spinner=False)
 def get_cached_model(backbone: str, model_type: str, seed: int):
     """Load and cache model on GPU/CPU."""
-    return load_model_for_ui(backbone, model_type, seed, DEVICE)
+    try:
+        return load_model_for_ui(backbone, model_type, seed, DEVICE)
+    except (FileNotFoundError, Exception):
+        return None
 
 
 @st.cache_data(show_spinner=False)
@@ -251,21 +255,34 @@ def render_sidebar() -> Dict[str, Any]:
         st.markdown("### 🦴 BoneTrace PACS XAI")
         st.caption(f"Medical XAI Diagnostic Workstation | {DEVICE.type.upper()}")
 
-        # ── 1. Backbone Selector ──────────────────────────────────────────────
+        # ── 1. Dynamic Backbone Selector ──────────────────────────────────────
+        available_ckpts = scan_available_checkpoints()
+        backbone_options = [b for b in ["densenet121", "resnet18"] if b in available_ckpts]
+        if not backbone_options:
+            backbone_options = list(available_ckpts.keys()) or ["densenet121", "resnet18"]
+
         st.markdown("<div class='sb-section-hdr'>1. Backbone Architecture</div>", unsafe_allow_html=True)
         backbone = st.selectbox(
             "Backbone Model",
-            options=["resnet18", "densenet121"],
-            format_func=lambda x: "ResNet-18 (Audited Baseline)" if x == "resnet18" else "DenseNet-121 (Ablation)",
+            options=backbone_options,
+            format_func=lambda x: "DenseNet-121 (Ablation)" if x == "densenet121" else "ResNet-18 (Audited Baseline)",
             key="sb_backbone",
             label_visibility="collapsed",
         )
 
-        # ── 2. Seed Selector ──────────────────────────────────────────────────
+        # ── 2. Dynamic Seed Selector based on chosen backbone ─────────────────
+        available_seeds = available_ckpts.get(backbone, [42, 123, 2026])
+        if not available_seeds:
+            available_seeds = [42, 123, 2026]
+
+        # Reset session state seed if it is invalid for the newly selected backbone
+        if "sb_seed" in st.session_state and st.session_state["sb_seed"] not in available_seeds:
+            st.session_state["sb_seed"] = available_seeds[0]
+
         st.markdown("<div class='sb-section-hdr'>2. Checkpoint Seed</div>", unsafe_allow_html=True)
         seed = st.selectbox(
             "Seed",
-            options=SEEDS,
+            options=available_seeds,
             format_func=lambda x: f"Seed {x}" + (" (Primary Audit)" if x == 42 else ""),
             key="sb_seed",
             label_visibility="collapsed",
@@ -276,9 +293,9 @@ def render_sidebar() -> Dict[str, Any]:
         ckpt_a = get_checkpoint_path(backbone, "baseline", seed)
         ckpt_b = get_checkpoint_path(backbone, "region", seed)
         with col_s1:
-            st.caption(f"Model A: {'🟢 Ready' if ckpt_a.is_file() else '🔴 Missing'}")
+            st.caption(f"Model A: {'🟢 Ready' if (ckpt_a and ckpt_a.is_file()) else '🔴 Missing'}")
         with col_s2:
-            st.caption(f"Model B: {'🟢 Ready' if ckpt_b.is_file() else '🔴 Missing'}")
+            st.caption(f"Model B: {'🟢 Ready' if (ckpt_b and ckpt_b.is_file()) else '🔴 Missing'}")
 
         # ── 3. Attribution Method & Layer ─────────────────────────────────────
         st.markdown("<div class='sb-section-hdr'>3. Attribution Method & Layer</div>", unsafe_allow_html=True)
@@ -399,8 +416,8 @@ def render_tab_triage(cfg: Dict[str, Any]) -> None:
     model_a = get_cached_model(cfg["backbone"], "baseline", cfg["seed"])
     model_b = get_cached_model(cfg["backbone"], "region", cfg["seed"])
 
-    if model_a is None and model_b is None:
-        st.error(f"❌ Checkpoints for {cfg['backbone']} seed {cfg['seed']} not found in `outputs/checkpoints/`.")
+    if model_a is None or model_b is None:
+        st.warning("⚠️ Checkpoint not found on disk. Please select a different seed.")
         return
 
     # Inference & Saliency
@@ -603,8 +620,8 @@ def render_tab_perturbation(cfg: Dict[str, Any]) -> None:
     model_a = get_cached_model(cfg["backbone"], "baseline", cfg["seed"])
     model_b = get_cached_model(cfg["backbone"], "region", cfg["seed"])
 
-    if model_a is None and model_b is None:
-        st.error("No checkpoints found.")
+    if model_a is None or model_b is None:
+        st.warning("⚠️ Checkpoint not found on disk. Please select a different seed.")
         return
 
     # Compute saliency maps for perturbation guidance

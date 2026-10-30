@@ -8,6 +8,7 @@ FOV masking, bounding box parsing/drawing, and dual-model causal perturbation si
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -23,8 +24,18 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageFile
 
-# ── Ensure src/ is on import path when called from project root ────────────────
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+# ── Ensure src/ and repo root are resolved reliably ───────────────────────────
+def get_repo_root() -> Path:
+    """Resolve repository root directory reliably across environments."""
+    p = Path(__file__).resolve().parents[3]
+    if (p / "outputs").is_dir():
+        return p
+    cwd = Path.cwd()
+    if (cwd / "outputs").is_dir():
+        return cwd
+    return p
+
+_REPO_ROOT = get_repo_root()
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
@@ -44,26 +55,88 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 TARGET_SIZE   = (512, 512)   # (W, H)
 
-CHECKPOINT_NAMES: Dict[str, Dict[str, str]] = {
-    "resnet18": {
-        "baseline": "baseline_seed{seed}.pt",
-        "region":   "region_supervised_seed{seed}.pt",
-    },
-    "densenet121": {
-        "baseline": "densenet121_baseline_seed{seed}.pt",
-        "region":   "densenet121_region_seed{seed}.pt",
-    },
-}
-
-_REPO_ROOT_PATH = Path(__file__).resolve().parents[4]
-CHECKPOINTS_DIR = _REPO_ROOT_PATH / "outputs" / "checkpoints"
+CHECKPOINTS_DIR = _REPO_ROOT / "outputs" / "checkpoints"
 
 
-# ── Model Loading (Streamlit cache_resource wrapper) ───────────────────────────
-def get_checkpoint_path(backbone: str, model_type: str, seed: int) -> Path:
-    """Resolve checkpoint file path for a given backbone/model_type/seed combo."""
-    tpl = CHECKPOINT_NAMES[backbone][model_type]
-    return CHECKPOINTS_DIR / tpl.format(seed=seed)
+# ── Dynamic Checkpoint Scanner & Path Resolution ──────────────────────────────
+def scan_available_checkpoints(checkpoints_dir: Optional[Path] = None) -> Dict[str, List[int]]:
+    """Scan outputs/checkpoints/ to identify existing backbone and seed combinations.
+
+    Returns:
+        Dict mapping backbone name to sorted list of seeds where both baseline
+        and region checkpoints exist, or at least one exists.
+        e.g. {'densenet121': [42, 123, 2026], 'resnet18': [123, 2026]}
+    """
+    ckpt_dir = Path(checkpoints_dir) if checkpoints_dir else CHECKPOINTS_DIR
+    if not ckpt_dir.is_dir():
+        return {"densenet121": [42, 123, 2026], "resnet18": [123, 2026]}
+
+    patterns = [
+        # DenseNet-121 patterns
+        (re.compile(r"^densenet121_baseline_seed(\d+)\.pt$", re.I), "densenet121", "baseline"),
+        (re.compile(r"^densenet121_region(?:_supervised)?_seed(\d+)\.pt$", re.I), "densenet121", "region"),
+        # ResNet-18 patterns
+        (re.compile(r"^(?:resnet18_)?baseline_seed(\d+)\.pt$", re.I), "resnet18", "baseline"),
+        (re.compile(r"^(?:resnet18_)?region(?:_supervised)?_seed(\d+)\.pt$", re.I), "resnet18", "region"),
+    ]
+
+    discovered: Dict[str, Dict[int, Dict[str, Path]]] = {}
+    for f in ckpt_dir.glob("*.pt"):
+        fname = f.name
+        for pat, bb, mt in patterns:
+            m = pat.match(fname)
+            if m:
+                s = int(m.group(1))
+                discovered.setdefault(bb, {}).setdefault(s, {})[mt] = f
+                break
+
+    # Prioritize seeds where both baseline and region models exist
+    result: Dict[str, List[int]] = {}
+    for bb, seeds in discovered.items():
+        both_exist = [s for s, models in seeds.items() if "baseline" in models and "region" in models]
+        if both_exist:
+            result[bb] = sorted(both_exist)
+        else:
+            result[bb] = sorted(seeds.keys())
+
+    # Fallback to sensible defaults if empty
+    if not result:
+        return {"densenet121": [42, 123, 2026], "resnet18": [123, 2026]}
+
+    return result
+
+
+def get_checkpoint_path(backbone: str, model_type: str, seed: int) -> Optional[Path]:
+    """Resolve checkpoint file path for a given backbone/model_type/seed combo.
+
+    Checks primary and alternative file naming conventions.
+    """
+    bb_norm = backbone.lower().strip()
+    mt_norm = "region" if ("region" in model_type.lower() or "aux" in model_type.lower()) else "baseline"
+
+    candidates: List[Path] = []
+    if bb_norm in ["densenet121", "densenet", "dense121"]:
+        if mt_norm == "baseline":
+            candidates.append(CHECKPOINTS_DIR / f"densenet121_baseline_seed{seed}.pt")
+        else:
+            candidates.append(CHECKPOINTS_DIR / f"densenet121_region_seed{seed}.pt")
+            candidates.append(CHECKPOINTS_DIR / f"densenet121_region_supervised_seed{seed}.pt")
+    elif bb_norm in ["resnet18", "resnet", "resnet-18"]:
+        if mt_norm == "baseline":
+            candidates.append(CHECKPOINTS_DIR / f"baseline_seed{seed}.pt")
+            candidates.append(CHECKPOINTS_DIR / f"resnet18_baseline_seed{seed}.pt")
+        else:
+            candidates.append(CHECKPOINTS_DIR / f"region_supervised_seed{seed}.pt")
+            candidates.append(CHECKPOINTS_DIR / f"region_seed{seed}.pt")
+            candidates.append(CHECKPOINTS_DIR / f"resnet18_region_supervised_seed{seed}.pt")
+            candidates.append(CHECKPOINTS_DIR / f"resnet18_region_seed{seed}.pt")
+
+    for c in candidates:
+        if c.is_file():
+            return c
+
+    # Return primary candidate path even if not yet on disk (for status checking)
+    return candidates[0] if candidates else None
 
 
 def load_model_for_ui(
@@ -71,21 +144,27 @@ def load_model_for_ui(
     model_type: str,
     seed: int,
     device: torch.device,
-) -> Optional[nn.Module]:
-    """Load and return a BoneTrace model from checkpoint, or None if not found.
+) -> nn.Module:
+    """Load and return a BoneTrace model from checkpoint.
 
     Args:
         backbone: 'resnet18' or 'densenet121'.
         model_type: 'baseline' or 'region'.
-        seed: Checkpoint seed (42, 123, 2026).
+        seed: Checkpoint seed (e.g. 42, 123, 2026).
         device: Target torch.device.
 
     Returns:
-        Loaded nn.Module in eval mode, or None if checkpoint does not exist.
+        Loaded nn.Module in eval mode.
+
+    Raises:
+        FileNotFoundError: If the checkpoint file does not exist on disk.
     """
     ckpt_path = get_checkpoint_path(backbone, model_type, seed)
-    if not ckpt_path.is_file():
-        return None
+    if ckpt_path is None or not ckpt_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint not found for backbone='{backbone}', model_type='{model_type}', seed={seed}. "
+            f"Checked directory: {CHECKPOINTS_DIR}"
+        )
 
     model = build_model(
         model_type=model_type,
