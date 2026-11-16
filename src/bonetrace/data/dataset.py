@@ -71,36 +71,91 @@ def load_image_safely(file_path: Union[str, Path]) -> Image.Image:
 def rasterize_boxes_to_mask(
     boxes: Sequence[Sequence[float]],
     canvas_size: Tuple[int, int] = (512, 512),
+    mode: str = "hard",
+    sigma_scale: float = 4.0,
 ) -> torch.Tensor:
-    """Rasterize bounding boxes [xmin, ymin, xmax, ymax] onto a binary mask tensor.
+    """Rasterize bounding boxes [xmin, ymin, xmax, ymax] onto a region-supervision mask tensor.
+
+    Supports:
+      - 'hard': Standard binary box mask with 1.0 inside and 0.0 outside (legacy default).
+      - 'gaussian': Normalized 2D elliptical Gaussian distance transform centered on the lesion fissure,
+        concentrating supervisory signal at the central fracture line and smoothly attenuating
+        false penalties on healthy surrounding tissue near box borders.
+      - 'distance_transform': Normalized Euclidean distance transform from box borders to medial axis.
 
     Args:
         boxes: List or sequence of bounding boxes in canvas pixel coordinates.
         canvas_size: (width, height) of the canvas.
+        mode: Rasterization strategy ('hard', 'gaussian', 'distance_transform').
+        sigma_scale: Scale factor for Gaussian standard deviation relative to box dimensions (default: 4.0).
 
     Returns:
-        torch.Tensor of shape (1, height, width) with 1.0 inside boxes and 0.0 outside.
+        torch.Tensor of shape (1, height, width) with float values in [0.0, 1.0].
     """
     target_w, target_h = canvas_size
     if not boxes:
         return torch.zeros((1, target_h, target_w), dtype=torch.float32)
 
-    mask_img = Image.new("L", (target_w, target_h), 0)
-    draw = ImageDraw.Draw(mask_img)
+    if mode == "hard":
+        mask_img = Image.new("L", (target_w, target_h), 0)
+        draw = ImageDraw.Draw(mask_img)
 
+        for box in boxes:
+            if len(box) != 4:
+                continue
+            xmin, ymin, xmax, ymax = box
+            xmin_c = max(0.0, min(float(xmin), float(target_w)))
+            ymin_c = max(0.0, min(float(ymin), float(target_h)))
+            xmax_c = max(0.0, min(float(xmax), float(target_w)))
+            ymax_c = max(0.0, min(float(ymax), float(target_h)))
+            if xmax_c > xmin_c and ymax_c > ymin_c:
+                draw.rectangle([xmin_c, ymin_c, xmax_c, ymax_c], fill=255)
+
+        mask_arr = np.array(mask_img, dtype=np.float32) / 255.0
+        return torch.from_numpy(mask_arr).unsqueeze(0)
+
+    # Soft boundary refinement modes ('gaussian' or 'distance_transform')
+    mask_arr = np.zeros((target_h, target_w), dtype=np.float32)
     for box in boxes:
         if len(box) != 4:
             continue
-        xmin, ymin, xmax, ymax = box
-        # Clamp to canvas boundaries
-        xmin_c = max(0.0, min(float(xmin), float(target_w)))
-        ymin_c = max(0.0, min(float(ymin), float(target_h)))
-        xmax_c = max(0.0, min(float(xmax), float(target_w)))
-        ymax_c = max(0.0, min(float(ymax), float(target_h)))
-        if xmax_c > xmin_c and ymax_c > ymin_c:
-            draw.rectangle([xmin_c, ymin_c, xmax_c, ymax_c], fill=255)
+        xmin, ymin, xmax, ymax = [float(v) for v in box]
+        xmin_c = max(0.0, min(xmin, float(target_w)))
+        ymin_c = max(0.0, min(ymin, float(target_h)))
+        xmax_c = max(0.0, min(xmax, float(target_w)))
+        ymax_c = max(0.0, min(ymax, float(target_h)))
+        bw = xmax_c - xmin_c
+        bh = ymax_c - ymin_c
+        if bw <= 0.0 or bh <= 0.0:
+            continue
 
-    mask_arr = np.array(mask_img, dtype=np.float32) / 255.0
+        x_indices = np.arange(int(np.floor(xmin_c)), int(np.ceil(xmax_c)))
+        y_indices = np.arange(int(np.floor(ymin_c)), int(np.ceil(ymax_c)))
+        if len(x_indices) == 0 or len(y_indices) == 0:
+            continue
+        xx, yy = np.meshgrid(x_indices, y_indices)
+
+        if mode == "gaussian":
+            cx = (xmin_c + xmax_c) / 2.0
+            cy = (ymin_c + ymax_c) / 2.0
+            sigma_x = max(1.0, bw / sigma_scale)
+            sigma_y = max(1.0, bh / sigma_scale)
+            g = np.exp(-0.5 * (((xx - cx) / sigma_x) ** 2 + ((yy - cy) / sigma_y) ** 2))
+            mask_arr[yy, xx] = np.maximum(mask_arr[yy, xx], g.astype(np.float32))
+
+        elif mode == "distance_transform":
+            dx = np.minimum(xx - xmin_c, xmax_c - xx)
+            dy = np.minimum(yy - ymin_c, ymax_c - yy)
+            d = np.minimum(dx, dy)
+            max_d = max(1.0, min(bw, bh) / 2.0)
+            norm_d = np.clip(d / max_d, 0.0, 1.0)
+            mask_arr[yy, xx] = np.maximum(mask_arr[yy, xx], norm_d.astype(np.float32))
+
+        else:
+            raise ValueError(
+                f"Unsupported mask rasterization mode: '{mode}'. Expected 'hard', 'gaussian', or 'distance_transform'."
+            )
+
     return torch.from_numpy(mask_arr).unsqueeze(0)
 
 
@@ -119,6 +174,7 @@ class FracAtlasDataset(Dataset):
         exclude_conflicts: bool = True,
         transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         normalize: bool = True,
+        mask_mode: str = "hard",
     ) -> None:
         """Initialize FracAtlasDataset.
 
@@ -129,12 +185,14 @@ class FracAtlasDataset(Dataset):
             exclude_conflicts: Whether to exclude the 4 verified disputed clone groups.
             transform: Optional tensor-level transformation applied after tensor conversion.
             normalize: Whether to apply ImageNet standardization (mean/std).
+            mask_mode: Strategy for rasterizing bounding boxes ('hard', 'gaussian', 'distance_transform').
         """
         super().__init__()
         self.target_size = target_size
         self.exclude_conflicts = exclude_conflicts
         self.transform = transform
         self.normalize = normalize
+        self.mask_mode = mask_mode
         self.letterbox = LetterboxTransform(target_size=target_size)
 
         # 1. Load dataframe
@@ -214,8 +272,10 @@ class FracAtlasDataset(Dataset):
 
         has_annotation = bool(len(boxes_list) > 0 and label_val > 0.5)
 
-        # Generate binary region target mask (1, H, W)
-        mask_tensor = rasterize_boxes_to_mask(boxes_list, canvas_size=self.target_size)
+        # Generate region target mask (1, H, W) via configured rasterization strategy
+        mask_tensor = rasterize_boxes_to_mask(
+            boxes_list, canvas_size=self.target_size, mode=self.mask_mode
+        )
 
         # Bounding boxes tensor (N, 4)
         if boxes_list:

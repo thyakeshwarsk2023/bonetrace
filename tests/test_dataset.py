@@ -123,6 +123,26 @@ def test_rasterize_boxes_to_mask():
     assert mask[0, 35, 25].item() == 1.0  # inside box
     assert mask[0, 5, 5].item() == 0.0    # outside box
 
+    # Soft Gaussian distance transform mask
+    mask_gauss = rasterize_boxes_to_mask(boxes, canvas_size=(100, 100), mode="gaussian")
+    assert mask_gauss.shape == (1, 100, 100)
+    assert mask_gauss.max().item() == 1.0
+    assert mask_gauss[0, 40, 30].item() == 1.0  # Center peak at (cx=30, cy=40)
+    assert mask_gauss[0, 30, 20].item() < 0.5   # Smooth attenuation near box border
+    assert mask_gauss[0, 5, 5].item() == 0.0    # Zero outside box
+
+    # Euclidean distance transform mask
+    mask_dt = rasterize_boxes_to_mask(boxes, canvas_size=(100, 100), mode="distance_transform")
+    assert mask_dt.shape == (1, 100, 100)
+    assert mask_dt.max().item() == 1.0
+    assert mask_dt[0, 40, 30].item() == 1.0     # Medial axis center peak
+    assert mask_dt[0, 30, 20].item() == 0.0     # Zero exactly on box boundary
+    assert mask_dt[0, 5, 5].item() == 0.0       # Zero outside box
+
+    # Invalid mode raises ValueError
+    with pytest.raises(ValueError, match="Unsupported mask rasterization mode"):
+        rasterize_boxes_to_mask(boxes, canvas_size=(100, 100), mode="invalid_mode")
+
 
 def test_disputed_clone_exclusion(synthetic_manifest_df):
     """Verify that disputed clone group CANON_3339 is excluded by default, but kept when False."""
