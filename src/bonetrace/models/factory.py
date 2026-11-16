@@ -32,6 +32,7 @@ def build_model(
     target_size: tuple[int, int] = (512, 512),
     backbone: Optional[str] = None,
     memory_efficient: bool = True,
+    use_fpn: bool = True,
 ) -> nn.Module:
     """Build and return a model instance based on configuration and model type.
 
@@ -152,6 +153,7 @@ def build_model(
             target_size=target_size,
             backbone=canonical_backbone,
             memory_efficient=memory_efficient,
+            use_fpn=use_fpn,
         )
 
     return model

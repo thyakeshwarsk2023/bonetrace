@@ -221,7 +221,7 @@ def test_export_exclusion_report(tmp_path):
 
 
 def test_frozen_split_manifests_exclusion_counts():
-    """Verify that the primary benchmark protocol yields 2,842 / 612 / 610 across real split CSVs."""
+    """Verify that the reconciled benchmark protocol yields 2,846 / 609 / 609 across real split CSVs."""
     proc_dir = Path("data/processed")
     if not (proc_dir / "train.csv").is_file():
         pytest.skip("Processed split CSVs not available")
@@ -230,19 +230,21 @@ def test_frozen_split_manifests_exclusion_counts():
     val_ds = FracAtlasDataset(proc_dir / "val.csv", split="val", exclude_conflicts=True)
     test_ds = FracAtlasDataset(proc_dir / "test.csv", split="test", exclude_conflicts=True)
 
-    # 1. Exact primary benchmark counts
-    assert len(train_ds) == 2842
-    assert len(val_ds) == 612
-    assert len(test_ds) == 610
+    # 1. Exact reconciled benchmark counts
+    assert len(train_ds) == 2846
+    assert len(val_ds) == 609
+    assert len(test_ds) == 609
 
-    # 2. Verify exact canonical IDs excluded per split
-    assert [r["canonical_id"] for r in train_ds.excluded_records] == ["CANON_3339"]
-    assert [r["canonical_id"] for r in val_ds.excluded_records] == ["CANON_1668"]
-    assert sorted([r["canonical_id"] for r in test_ds.excluded_records]) == ["CANON_0206", "CANON_0678"]
+    # 2. Verify all 4 disputed clone records are isolated to train partition and excluded
+    assert sorted([r["canonical_id"] for r in train_ds.excluded_records]) == sorted([
+        "CANON_0206", "CANON_0678", "CANON_1668", "CANON_3339"
+    ])
+    assert len(val_ds.excluded_records) == 0
+    assert len(test_ds.excluded_records) == 0
 
-    # 3. Retained distinct-radiograph pairs are preserved
-    train_cids = {r["canonical_id"] for r in train_ds.records}
-    assert "CANON_0382" in train_cids
-    assert "CANON_3487" in train_cids
-    assert "CANON_1242" in train_cids
-    assert "CANON_3205" in train_cids
+    # 3. Retained distinct-radiograph pairs are preserved across splits
+    all_cids = {r["canonical_id"] for r in train_ds.records} | {r["canonical_id"] for r in val_ds.records} | {r["canonical_id"] for r in test_ds.records}
+    assert "CANON_0382" in all_cids
+    assert "CANON_3487" in all_cids
+    assert "CANON_1242" in all_cids
+    assert "CANON_3205" in all_cids

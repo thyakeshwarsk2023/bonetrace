@@ -136,3 +136,35 @@ def test_build_model_densenet121_variants():
     assert isinstance(m_reg, RegionSupervisedModel)
     assert m_reg.backbone_name == "densenet121"
 
+
+def test_region_supervised_fpn_multiscale_shapes():
+    """Verify Feature Pyramid Network (FPN) produces high-resolution mask logits fusing C2, C3, C4."""
+    model = RegionSupervisedModel(backbone="resnet18", pretrained=False, use_fpn=True)
+    model.eval()
+
+    x = torch.randn(2, 3, 512, 512)
+    with torch.no_grad():
+        c2, c3, c4 = model.extract_multiscale_features(x)
+        out = model(x)
+
+    assert c2.shape == (2, 128, 64, 64)    # Stride 8
+    assert c3.shape == (2, 256, 32, 32)    # Stride 16
+    assert c4.shape == (2, 512, 16, 16)    # Stride 32
+    assert out["mask_logits"].shape == (2, 1, 512, 512)
+    assert out["logits"].shape == (2, 1)
+
+
+def test_region_supervised_legacy_mode_compatibility():
+    """Verify RegionSupervisedModel functions in legacy mode (use_fpn=False)."""
+    model = RegionSupervisedModel(backbone="resnet18", pretrained=False, use_fpn=False)
+    model.eval()
+
+    x = torch.randn(2, 3, 512, 512)
+    with torch.no_grad():
+        out = model(x)
+
+    assert out["mask_logits"].shape == (2, 1, 512, 512)
+    assert out["logits"].shape == (2, 1)
+    assert model.use_fpn is False
+
+
